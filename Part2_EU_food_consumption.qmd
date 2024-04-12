@@ -1,0 +1,548 @@
+---
+title: "Statistical Learning Part 2"
+format: html
+editor: visual
+---
+
+```{r}
+install.packages("factoextra")
+install.packages("maps")
+```
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(cluster) 
+library(writexl)
+library(dplyr)
+library(ggplot2)
+library(factoextra)
+library(dendextend)
+library(stats)
+library(maps)
+library(ggrepel)
+```
+
+## Loading the dataset
+
+```{r}
+df <- read_excel("Foodex.xlsx")
+```
+
+### Preprocessing
+
+```{r}
+# Removing the unnecessary rows
+df <- df[-1,]
+colnames(df)<-df[1, ]
+df <- df[-1,]
+```
+
+```{r}
+df <- df[, -c(2, 3, 10:16)]
+```
+
+```{r}
+colSums(is.na(df))
+```
+
+```{r}
+View(df)
+```
+
+```{r}
+names(df)[names(df) == "Survey's country"] <- "Country"
+names(df)[names(df) == "Population Group (L2)"] <- "Pop_group"
+names(df)[names(df) == "Exposure hierarchy (L1)"] <- "Food_group"
+names(df)[names(df) == "Number of subjects"] <- "N_subjects"
+names(df)[names(df) == "Number of consumers"] <- "N_consumers"
+names(df)[names(df) == "Standard Deviation"] <- "Std"
+```
+
+```{r}
+#Replacing the country names for the visualisation of clusters using map library
+df <- df %>%
+  mutate(Country = ifelse(Country == "Czechia", "Czech Republic", Country))%>%
+  mutate(Country = ifelse(Country == "Republic of North Macedonia", "North Macedonia", Country))%>%
+  mutate(Country = ifelse(Country == "United Kingdom", "UK", Country))
+```
+
+```{r}
+unique(df$Country)
+```
+
+```{r}
+unique(df$Pop_group)
+```
+
+```{r}
+unique(df$Food_group)
+```
+
+```{r}
+df$N_subjects <- as.numeric(df$N_subjects)
+df$N_consumers <- as.numeric(df$N_consumers)
+df$Mean <- as.numeric(df$Mean)
+df$Std <- as.numeric(df$Std)
+```
+
+```{r}
+#Combining some columns
+df <- df %>%
+  mutate(
+    Food_group = case_when(
+      Food_group %in% c("Fruit and fruit products",
+                        "Vegetables and vegetable products",
+                        "Fruit and vegetable juices and nectars (including concentrates)") ~ "Fruits and Vegetables",
+      Food_group %in% c("Coffee, cocoa, tea and infusions", "Water and water-based beverages") ~ "Non-alcoholic beverages",
+      TRUE ~ as.character(Food_group)  # Keeping the rest of the groups as they are
+    )
+  )
+```
+
+```{r}
+# Removing food groups
+remove_groups <- c("Animal and vegetable fats and oils and primary derivatives thereof", 
+                   "Composite dishes", "Legumes, nuts, oilseeds and spices", 
+                   "Major isolated ingredients, additives, flavours, baking and processing aids","Eggs and egg products", 
+                   "Seasoning, sauces and condiments","Non-alcoholic beverages",
+                   "Starchy roots or tubers and products thereof, sugar plants",
+                   "Food products for young population","Products for non-standard diets, food imitates and food supplements",
+                   "Other ingredients", "Grains and grain-based products")
+df <- df[!df$Food_group %in% remove_groups, ]
+```
+
+Since the clustering algorithms can not take into account different population groups in each country, the following steps will be taken:
+
+1.  Sum all age groups (aggregating)
+
+2.  Cluster based on the adult group
+
+### Aggregating all age groups
+
+```{r}
+#Calculating new mean (for the entire population) for each country
+data_aggregated <- df
+data_aggregated$total_consumption <- data_aggregated$N_consumers * data_aggregated$Mean
+data_aggregated <- data_aggregated %>%
+  group_by(Country, Food_group) %>%
+  summarise(Total_Consumption = sum(total_consumption, na.rm = TRUE),
+            Total_People = sum(N_subjects, na.rm = TRUE),
+            .groups = 'drop')%>%
+  mutate(Mean = Total_Consumption / Total_People)
+```
+
+Now let's calculate the highest deviation in consumption for each food group.
+
+```{r}
+# First, calculating the overall mean for each food group
+overall_means <- data_aggregated %>%
+  group_by(Food_group) %>%
+  summarise(Overall_Mean = mean(Mean, na.rm = TRUE))
+
+# Now joining this back to the original dataframe
+data_comparison <- data_aggregated %>%
+  left_join(overall_means, by = "Food_group") %>%
+  # Calculating the deviation of each country's mean from the overall mean
+  mutate(Deviation = Mean - Overall_Mean) %>%
+  # Filtering for significant deviations, e.g., where a country's mean is more than 1 standard deviation above the overall mean
+  arrange(desc(Deviation))
+
+# Viewing countries with the highest deviation for each food group
+top_countries_by_food_group <- data_comparison %>%
+  group_by(Food_group) %>%
+  filter(Deviation == max(Deviation))
+  
+# Printing the results
+print(top_countries_by_food_group)
+```
+
+```{r}
+View(top_countries_by_food_group)
+```
+
+```{r}
+#Removing unnecessary columns
+data_aggregated <- data_aggregated[, -c(3,4)]
+```
+
+### **Data visualization**
+
+```{r}
+# Unique food groups in the data
+food_groups <- unique(data_aggregated$Food_group)
+
+# Create a list to store plots
+plots_list <- list()
+
+# Loop through each food group and create a separate plot
+for(fg in food_groups) {
+  # Subset the data for the current food group
+  subset_data <- subset(data_aggregated, Food_group == fg)
+  
+  # Create the plot for the current food group
+  p <- ggplot(subset_data, aes(x = Country, y = Mean, fill = Country)) +
+    geom_bar(stat = "identity") +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    labs(y = "Mean Value", x = "Country") +
+    ggtitle(paste("Mean Values for", fg))
+  
+  # Store the plot in the list
+  plots_list[[fg]] <- p
+}
+
+# Now you can print the plots one by one
+for(p in plots_list) {
+  print(p)
+}
+```
+
+### Feature Scaling&Engineering
+
+```{r}
+data_standardized <- data_aggregated %>%
+  mutate_if(is.numeric, scale)
+```
+
+```{r}
+data_wide <- data_standardized %>%
+  pivot_wider(names_from = Food_group, values_from = Mean, values_fn = mean) 
+```
+
+```{r}
+head(data_wide)
+```
+
+### Kmeans clustering
+
+```{r}
+data_kmeans <- data_wide
+```
+
+```{r}
+data_for_clustering <- select(data_kmeans, -Country)
+```
+
+```{r}
+# Determining the optimal number of clusters, for example, using the Elbow method
+fviz_nbclust(data_for_clustering, kmeans, method = "wss")
+```
+
+```{r}
+set.seed(123) # Ensuring reproducibility
+kmeans_result <- kmeans(data_for_clustering, centers = 3, nstart = 25) 
+# Adding the cluster assignment to the original data
+data_kmeans$Cluster <- kmeans_result$cluster
+```
+
+```{r}
+clusters <- data_kmeans %>%
+  group_by(Cluster) %>%
+  summarise(Countries = toString(Country), .groups = 'drop')
+
+# Printing out the clusters with countries as strings
+head(clusters)
+```
+
+```{r}
+cluster_profiles <- data_kmeans %>%
+  group_by(Cluster) %>%
+  summarise(across(where(is.numeric), ~ mean(., na.rm = TRUE))) 
+
+print(cluster_profiles)
+```
+
+```{r}
+View(cluster_profiles)
+```
+
+```{r}
+#Calculating the Silhouette score
+sil_width <- silhouette(kmeans_result$cluster, dist(data_for_clustering))
+avg_sil_width <- mean(sil_width[, 'sil_width'])
+cat("The Silhouette score:", avg_sil_width)
+```
+
+```{r}
+# Plotting the silhouette analysis
+fviz_silhouette(sil_width) + 
+  theme_minimal() +
+  ggtitle("Silhouette Plot")
+```
+
+```{r}
+# Plotting the clusters of countries on the map
+# Loading map data
+world_map <- map_data("world")
+
+# Separating the countries into individual rows
+clusters <- clusters %>%
+  separate_rows(Countries, sep = ", ") %>%
+  mutate(Countries = trimws(Countries))
+
+# Merging the cluster data with the map data
+clusters_map_data <- clusters %>%
+  left_join(world_map, by = c("Countries" = "region"))
+
+distinct_colors <- c("indianred", "skyblue", "darkolivegreen", "bisque", "darkmagenta")
+
+# Plotting the map with clusters
+ggplot() +
+  geom_polygon(data = clusters_map_data, aes(x = long, y = lat, group = group, fill = as.factor(Cluster)), color = "white") +
+  scale_fill_manual(values = distinct_colors) +
+  theme_minimal() +
+  labs(fill = "Cluster") +
+  coord_fixed(1.3) 
+```
+
+### Hierarchical clustering
+
+```{r}
+data_hclust <- data_wide
+# Saving the country names in a separate variable
+country_names <- data_hclust$Country
+
+# Removing the 'Country' column to ensure it's not included in the clustering algorithm
+data_hclust <- data_hclust %>% select(-Country)
+
+```
+
+```{r}
+# Calculating the distance matrix
+dist_matrix <- dist(data_hclust, method = "euclidean")
+
+# Performing hierarchical clustering
+hc <- hclust(dist_matrix, method = "ward.D2")
+
+# Converting to dendrogram
+dend <- as.dendrogram(hc)
+
+order <- hc$order
+
+# Label the dendrogram with country names according to the order
+labels(dend) <- country_names[order]
+
+
+# Plotting the dendrogram
+plot(dend, cex=0.6)
+```
+
+```{r}
+# Cutting the dendrogram to create the clusters
+hclusters_ <- cutree(hc, k=3)
+# Combining the cluster assignments with the country names
+cluster_assignments <- data.frame(Country = country_names, Cluster = hclusters_)
+
+# Creating a dataframe with clusters and corresponding list of countries
+hclusters <- cluster_assignments %>%
+  group_by(Cluster) %>%
+  summarise(Countries = toString(Country)) %>%
+  ungroup() # Converting back to regular dataframe
+
+print(hclusters)
+```
+
+```{r}
+# Loading map data
+world_map <- map_data("world")
+
+
+hclusters <- hclusters %>%
+  separate_rows(Countries, sep = ", ") %>%
+  mutate(Countries = trimws(Countries))
+
+clusters_map_data <- hclusters %>%
+  left_join(world_map, by = c("Countries" = "region"))
+
+distinct_colors <- c("indianred", "skyblue", "darkolivegreen", "bisque", "darkmagenta")
+
+
+ggplot() +
+  geom_polygon(data = clusters_map_data, aes(x = long, y = lat, group = group, fill = as.factor(Cluster)), color = "white") +
+  scale_fill_manual(values = distinct_colors)+
+  theme_minimal() +
+  labs(fill = "Cluster") +
+  coord_fixed(1.3) 
+```
+
+### Clustering on 'Adults' population class only
+
+```{r}
+df_adults <- df %>%
+  filter(Pop_group == "Adults")
+```
+
+```{r}
+# Unique food groups in the data
+food_groups <- unique(df_adults$Food_group)
+
+# Creating a list to store plots
+plots_list <- list()
+
+# Looping through each food group and create a separate plot
+for(fg in food_groups) {
+  # Subset the data for the current food group
+  subset_data <- subset(df_adults, Food_group == fg)
+
+  p <- ggplot(subset_data, aes(x = Country, y = Mean, fill = Country)) +
+    geom_bar(stat = "identity") +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    labs(y = "Mean Value", x = "Country") +
+    ggtitle(paste("Mean Values for", fg))
+  
+  
+  plots_list[[fg]] <- p
+}
+
+for(p in plots_list) {
+  print(p)
+}
+```
+
+```{r}
+data_standardized2 <- df_adults %>%
+  mutate_if(is.numeric, scale)
+
+data_standardized2 <- data_standardized2[, -c(2,4, 5, 7)]
+```
+
+```{r}
+head(data_standardized2)
+```
+
+```{r}
+data_wide2 <- data_standardized2 %>%
+  pivot_wider(names_from = Food_group, values_from = Mean, values_fn = mean) 
+data_kmeans2 <- data_wide2
+```
+
+### KMeans Clustering
+
+```{r}
+data_for_clustering2 <- select(data_kmeans2, -Country)
+```
+
+```{r}
+fviz_nbclust(data_for_clustering2, kmeans, method = "wss")
+```
+
+```{r}
+set.seed(123) 
+kmeans_result2 <- kmeans(data_for_clustering2, centers = 3, nstart = 25) 
+
+data_kmeans2$Cluster <- kmeans_result2$cluster
+
+clusters2 <- data_kmeans2 %>%
+  group_by(Cluster) %>%
+  summarise(Countries = toString(Country), .groups = 'drop')
+
+print(clusters2)
+
+```
+
+```{r}
+# Creating cluster profiles for each cluster
+cluster_profiles2 <- data_kmeans2 %>%
+  group_by(Cluster) %>%
+  summarise(across(where(is.numeric), ~ mean(., na.rm = TRUE))) 
+
+
+print(cluster_profiles2)
+```
+
+```{r}
+sil_width <- silhouette(kmeans_result2$cluster, dist(data_for_clustering2))
+avg_sil_width <- mean(sil_width[, 'sil_width'])
+cat("The Silhouette score:", avg_sil_width)
+```
+
+```{r}
+
+# Plot the silhouette analysis
+fviz_silhouette(sil_width) + 
+  theme_minimal() +
+  ggtitle("Silhouette Plot")
+```
+
+```{r}
+# Plotting the map with clusters
+world_map <- map_data("world")
+
+clusters2 <- clusters2 %>%
+  separate_rows(Countries, sep = ", ") %>%
+  mutate(Countries = trimws(Countries))
+
+clusters_map_data <- clusters2 %>%
+  left_join(world_map, by = c("Countries" = "region"))
+
+distinct_colors <- c("indianred", "skyblue", "darkolivegreen", "bisque", "darkmagenta")
+
+ggplot() +
+  geom_polygon(data = clusters_map_data, aes(x = long, y = lat, group = group, fill = as.factor(Cluster)), color = "white") +
+  scale_fill_manual(values = distinct_colors) +
+  theme_minimal() +
+  labs(fill = "Cluster") +
+  coord_fixed(1.3) 
+```
+
+### Hierarchical clustering
+
+```{r}
+# Preparing the dataset for clustering
+data_hclust2 <- data_wide2
+
+country_names <- data_hclust2$Country
+
+data_hclust2 <- data_hclust2 %>% select(-Country)
+```
+
+```{r}
+# Performing hierarchical clustering
+dist_matrix <- dist(data_hclust2, method = "euclidean")
+
+hc <- hclust(dist_matrix, method = "ward.D2")
+
+dend <- as.dendrogram(hc)
+
+order <- hc$order
+
+labels(dend) <- country_names[order]
+
+plot(dend, cex=0.6)
+```
+
+```{r}
+# Printing out the clusters
+hclusters_2 <- cutree(hc, k=3)
+
+cluster_assignments2 <- data.frame(Country = country_names, Cluster = hclusters_2)
+
+hclusters2 <- cluster_assignments2 %>%
+  group_by(Cluster) %>%
+  summarise(Countries = toString(Country)) %>%
+  ungroup() 
+
+print(hclusters2)
+```
+
+```{r}
+# Plotting the map with clusters
+world_map <- map_data("world")
+
+
+hclusters2 <- hclusters2 %>%
+  separate_rows(Countries, sep = ", ") %>%
+  mutate(Countries = trimws(Countries))
+
+clusters_map_data <- hclusters2 %>%
+  left_join(world_map, by = c("Countries" = "region"))
+
+distinct_colors <- c("coral", "skyblue", "darkolivegreen", "bisque", "darkmagenta")
+
+ggplot() +
+  geom_polygon(data = clusters_map_data, aes(x = long, y = lat, group = group, fill = as.factor(Cluster)), color = "white") +
+  scale_fill_manual(values = distinct_colors)+
+  theme_minimal() +
+  labs(fill = "Cluster") +
+  coord_fixed(1.3) 
+```
